@@ -1,0 +1,319 @@
+---
+title: "ADC in vivo DAR Monitoring-PK Tracker"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    fig_caption: true
+    latex_engine: pdflatex
+geometry: margin=2.5cm
+fontsize: 11pt
+header-includes:
+  - \usepackage[utf8]{inputenc}
+  - \usepackage{lmodern}
+params:
+  study_id:    "ADC-PK-001"
+  compound:    "ADC-001"
+  species:     "Cynomolgus monkey"
+  dose:        3.6
+  nominal_dar: 3.5
+  conc_unit:   "ug/mL"
+  dar_data:    NULL
+  nca_adc:     NULL
+  nca_ab:      NULL
+  nca_payload: NULL
+  dar_fit_k:   NA
+  dar_fit_t12: NA
+  col_adc:     "#0279EE"
+  col_ab:      "#75A025"
+  col_payload: "#FF9400"
+  col_dar_fit: "#FD9BED"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE,
+                      fig.width=7, fig.height=4, dpi=150)
+library(ggplot2)
+library(dplyr)
+library(knitr)
+library(tidyr)
+
+dd  <- params$dar_data
+col_adc     <- params$col_adc
+col_ab      <- params$col_ab
+col_payload <- params$col_payload
+col_dar_fit <- params$col_dar_fit
+
+theme_adc <- theme_bw(base_family="sans") +
+  theme(panel.grid.minor=element_blank(),
+        plot.title=element_text(size=12, face="bold"),
+        axis.title=element_text(size=10),
+        legend.position="bottom",
+        legend.title=element_blank())
+```
+
+---
+
+# Study Information
+
+| Field | Value |
+|---|---|
+| **Study ID** | `r params$study_id` |
+| **Compound** | `r params$compound` |
+| **Species** | `r params$species` |
+| **Dose** | `r params$dose` mg/kg IV |
+| **Nominal DAR** | `r params$nominal_dar` |
+| **Concentration Unit** | `r params$conc_unit` |
+| **Timepoints** | `r nrow(dd)` |
+| **Time Range** | `r min(dd$Time_h)` -- `r max(dd$Time_h)` h |
+| **Report Date** | `r Sys.Date()` |
+| **Software** | R `r R.version$major`.`r R.version$minor` / PKNCA `r packageVersion("PKNCA")` |
+
+---
+
+# PK Concentration-Time Profiles
+
+```{r pk_plot, fig.cap="Multi-analyte PK concentration-time profiles on semi-log scale. Points represent mean concentrations; error bars show +/-SD where available."}
+pk_long <- dd %>%
+  select(Time_h, Total_ADC_mean, Total_Ab_mean, FreePayload_mean,
+         Total_ADC_SD, Total_Ab_SD, FreePayload_SD) %>%
+  pivot_longer(cols=c(Total_ADC_mean, Total_Ab_mean, FreePayload_mean),
+               names_to="Analyte", values_to="Conc") %>%
+  mutate(
+    SD = case_when(
+      Analyte=="Total_ADC_mean"     ~ dd$Total_ADC_SD[match(Time_h, dd$Time_h)],
+      Analyte=="Total_Ab_mean"      ~ dd$Total_Ab_SD[match(Time_h, dd$Time_h)],
+      Analyte=="FreePayload_mean"   ~ dd$FreePayload_SD[match(Time_h, dd$Time_h)]
+    ),
+    Analyte = recode(Analyte,
+      "Total_ADC_mean"   = "Total ADC",
+      "Total_Ab_mean"    = "Total Antibody",
+      "FreePayload_mean" = "Free Payload")
+  )
+
+cols <- c("Total ADC"=col_adc, "Total Antibody"=col_ab, "Free Payload"=col_payload)
+
+ggplot(pk_long, aes(x=Time_h, y=Conc, color=Analyte, group=Analyte)) +
+  geom_line(linewidth=0.9) +
+  geom_point(size=2.5) +
+  geom_errorbar(aes(ymin=pmax(Conc-SD,1e-4), ymax=Conc+SD),
+                width=8, linewidth=0.5, na.rm=TRUE) +
+  scale_y_log10(labels=scales::label_number()) +
+  scale_color_manual(values=cols) +
+  labs(x="Time (h)",
+       y=paste0("Concentration (", params$conc_unit, ")"),
+       title="PK Concentration-Time Profiles (Semi-log)") +
+  theme_adc
+```
+
+---
+
+# DAR Trajectory
+
+## Average DAR Over Time
+
+Average DAR was calculated as:
+
+$$\text{avg DAR}(t) = \frac{\text{Total ADC}(t)}{\text{Total Antibody}(t)} \times \text{Nominal DAR}$$
+
+where both analytes are measured in mass concentration (`r params$conc_unit`). The ratio gives fractional conjugation; multiplying by nominal DAR converts to drug molecules per antibody molecule.
+
+```{r dar_plot, fig.cap="Average DAR over time. Dashed line: exponential decay fit. Dotted line: nominal DAR at dose."}
+dar_plot_df <- dd
+
+p_dar <- ggplot(dar_plot_df, aes(x=Time_h, y=DAR)) +
+  geom_hline(yintercept=params$nominal_dar, linetype="dotted",
+             color="grey60", linewidth=0.8) +
+  geom_line(color=col_adc, linewidth=1) +
+  geom_point(color=col_adc, size=3) +
+  labs(x="Time (h)", y="Average DAR",
+       title="Average DAR Over Time") +
+  scale_y_continuous(limits=c(0, params$nominal_dar * 1.25)) +
+  theme_adc
+
+if (!is.na(params$dar_fit_k)) {
+  fit_df <- data.frame(
+    Time_h = seq(min(dd$Time_h), max(dd$Time_h), length.out=200),
+    DAR    = dd$DAR[1] * exp(-params$dar_fit_k * seq(min(dd$Time_h),
+                                                       max(dd$Time_h),
+                                                       length.out=200))
+  )
+  p_dar <- p_dar +
+    geom_line(data=fit_df, aes(x=Time_h, y=DAR),
+              color=col_dar_fit, linetype="dashed", linewidth=1) +
+    annotate("text", x=max(dd$Time_h)*0.6, y=params$nominal_dar*1.1,
+             label=paste0("t1/2 = ", params$dar_fit_t12, " h  |  k = ",
+                          params$dar_fit_k, " h-1"),
+             size=3.2, color=col_dar_fit)
+}
+print(p_dar)
+```
+
+## DAR Stability Summary
+
+```{r dar_table}
+dar_summary <- data.frame(
+  Metric = c("Nominal DAR","DAR at T-first","DAR at T-last",
+             "% Nominal DAR Retained","Decay Rate k (h-1)","DAR Half-life (h)"),
+  Value  = c(params$nominal_dar,
+             round(dd$DAR[1],3),
+             round(tail(dd$DAR,1),3),
+             round(tail(dd$DAR_pct,1),1),
+             ifelse(is.na(params$dar_fit_k),"N/A",
+                    as.character(round(params$dar_fit_k,6))),
+             ifelse(is.na(params$dar_fit_t12),"N/A",
+                    as.character(round(params$dar_fit_t12,1))))
+)
+kable(dar_summary, align=c("l","r"), booktabs=TRUE,
+      caption="DAR stability metrics")
+```
+
+## DAR Trajectory Data
+
+```{r dar_data_table}
+tbl <- dd %>%
+  select(Time_h, Total_ADC_mean, Total_Ab_mean, Frac_conj, DAR, DAR_pct) %>%
+  mutate(across(where(is.numeric), ~round(.x,3))) %>%
+  rename(`Time (h)`=Time_h, `Total ADC`=Total_ADC_mean,
+         `Total Ab`=Total_Ab_mean,
+         `Frac. Conjugation`=Frac_conj,
+         `Avg DAR`=DAR, `% Nominal DAR`=DAR_pct)
+kable(tbl, align="r", booktabs=TRUE,
+      caption="Average DAR and fractional conjugation over time")
+```
+
+---
+
+# Free Payload Release Kinetics
+
+```{r payload_plot, fig.cap="Free payload concentration-time profile. Cmax and Tmax annotated."}
+cmax_idx <- which.max(dd$FreePayload_mean)
+
+ggplot(dd, aes(x=Time_h, y=FreePayload_mean)) +
+  geom_line(color=col_payload, linewidth=1) +
+  geom_point(color=col_payload, size=3) +
+  geom_errorbar(aes(ymin=pmax(FreePayload_mean-FreePayload_SD,0),
+                    ymax=FreePayload_mean+FreePayload_SD),
+                width=8, linewidth=0.5, color=col_payload, na.rm=TRUE) +
+  annotate("point", x=dd$Time_h[cmax_idx], y=dd$FreePayload_mean[cmax_idx],
+           color="red", size=4, shape=18) +
+  annotate("text",
+           x=dd$Time_h[cmax_idx] + max(dd$Time_h)*0.05,
+           y=dd$FreePayload_mean[cmax_idx],
+           label=paste0("Cmax=",round(dd$FreePayload_mean[cmax_idx],3),
+                        "
+Tmax=",dd$Time_h[cmax_idx],"h"),
+           size=3, hjust=0, color="red") +
+  labs(x="Time (h)",
+       y=paste0("Free Payload (", params$conc_unit, ")"),
+       title="Free Payload Release Kinetics") +
+  theme_adc
+```
+
+```{r payload_metrics}
+auc_trap <- sum(diff(dd$Time_h) *
+                (head(dd$FreePayload_mean,-1)+tail(dd$FreePayload_mean,-1))/2)
+payload_tbl <- data.frame(
+  Metric=c("Cmax","Tmax (h)","Clast","AUClast (trapezoidal)"),
+  Value =round(c(dd$FreePayload_mean[cmax_idx],
+                 dd$Time_h[cmax_idx],
+                 tail(dd$FreePayload_mean,1),
+                 auc_trap),4)
+)
+kable(payload_tbl, align=c("l","r"), booktabs=TRUE,
+      caption="Free payload PK highlights")
+```
+
+---
+
+# PK/PD Overlay
+
+The following dual-axis plot overlays the average DAR trajectory (left axis)
+with free payload concentration (right axis) to visualise the temporal
+relationship between ADC deconjugation and payload systemic exposure.
+
+
+```{r pkpd_plot, fig.cap="PK/PD overlay: average DAR trajectory (left axis, blue) and free payload concentration (right axis, orange). Dashed line: exponential DAR decay fit."}
+par(mar=c(5,4,4,5))
+
+# Base plot: DAR
+plot(dd$Time_h, dd$DAR,
+     type="b", pch=19, col=col_adc, lwd=2,
+     xlab="Time (h)", ylab="Average DAR",
+     ylim=c(0, params$nominal_dar*1.25),
+     main="PK/PD Overlay: DAR & Free Payload",
+     cex.main=1.1, cex.lab=0.95, las=1)
+
+if (!is.na(params$dar_fit_k)) {
+  t_seq <- seq(min(dd$Time_h), max(dd$Time_h), length.out=200)
+  lines(t_seq, dd$DAR[1]*exp(-params$dar_fit_k*t_seq),
+        col=col_dar_fit, lwd=1.5, lty=2)
+}
+
+# Second axis: payload
+par(new=TRUE)
+plot(dd$Time_h, dd$FreePayload_mean,
+     type="b", pch=18, col=col_payload, lwd=2, lty=2,
+     axes=FALSE, xlab="", ylab="",
+     ylim=c(0, max(dd$FreePayload_mean,na.rm=TRUE)*1.3))
+axis(side=4, las=1, col=col_payload, col.axis=col_payload)
+mtext(paste0("Free Payload (", params$conc_unit, ")"),
+      side=4, line=3.5, col=col_payload, cex=0.85)
+
+legend("topright", bty="n", cex=0.85,
+       legend=c("Avg DAR","DAR fit","Free Payload"),
+       col=c(col_adc, col_dar_fit, col_payload),
+       lty=c(1,2,2), pch=c(19,NA,18), lwd=2)
+```
+
+---
+
+# NCA Parameters
+
+> **Note on tmax:** A tmax value of 0 indicates that Cmax occurs at the first
+> measured timepoint within the NCA interval (T-first = first observed time,
+> not nominal time zero). This is expected for IV bolus administration where
+> peak concentrations are observed at the earliest sampling time.
+
+
+## Total ADC
+
+```{r nca_adc}
+kable(params$nca_adc, align=c("l","r"), booktabs=TRUE,
+      caption="NCA parameters --- Total ADC")
+```
+
+## Total Antibody
+
+```{r nca_ab}
+kable(params$nca_ab, align=c("l","r"), booktabs=TRUE,
+      caption="NCA parameters --- Total Antibody")
+```
+
+## Free Payload
+
+```{r nca_payload}
+kable(params$nca_payload, align=c("l","r"), booktabs=TRUE,
+      caption="NCA parameters --- Free Payload")
+```
+
+---
+
+# Methods
+
+**DAR Calculation:** Average DAR at each timepoint was computed as the ratio of Total ADC to Total Antibody concentrations (both in `r params$conc_unit`) multiplied by the nominal DAR at dose (`r params$nominal_dar`). This approach assumes both analytes are measured by mass-based assays (e.g., ELISA or LC-MS/MS) with equivalent antibody backbone molecular weight.
+
+**DAR Decay Fit:** An exponential decay model DAR(t) = DAR0 x exp(-k x t) was fitted to the observed DAR trajectory using nonlinear least squares (R `nls()`). DAR half-life was derived as t1/2 = ln(2)/k.
+
+**Non-Compartmental Analysis:** NCA was performed using the PKNCA package (v`r packageVersion("PKNCA")`) in R. The analysis interval spanned from the first observed timepoint to the last observed timepoint. AUClast was computed by the linear-log trapezoidal method. Terminal half-life was estimated from the log-linear terminal phase using automated lambda-z selection.
+
+**Payload Release Rate:** Payload release rate (DeltaC/Deltat) was estimated as the finite difference between consecutive timepoints.
+
+**Software:** R `r R.version$major`.`r R.version$minor` | PKNCA `r packageVersion("PKNCA")` | ggplot2 | openxlsx
+
+---
+
+*Report generated by ADC Biotransformation Tracker --- for research use only.*
+
